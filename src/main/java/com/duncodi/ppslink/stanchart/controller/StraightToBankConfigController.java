@@ -78,7 +78,7 @@ public class StraightToBankConfigController{
 
             StraightToBankConfigDto config = service.findOne(false);
 
-            return ResponseEntity.status(HttpStatus.CREATED).body(ApiResponse.success(config));
+            return ResponseEntity.status(HttpStatus.OK).body(ApiResponse.success(config));
 
         }catch (CustomException e){
             return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(ApiResponse.error(e.getMessage()));
