@@ -39,5 +39,10 @@ admin:
   service:
     url: http://api-gateway:8080/admin/api/v1
 
+
 scbkeys:
-  private-key-path: ${STANCHART_PRIVATE_KEY_PATH}
+  private-key-path: ${STANCHART_PRIVATE_KEY_PATH:/etc/ppslinkkeys/stanchart_bank_certs/www.pps.go.ug_private.pem}
+  keystore-path: ${STANCHART_KEYSTORE_PATH:/etc/ppslinkkeys/stanchart_bank_certs/www.pps.go.ug.p12}
+  keystore-password: ${STANCHART_KEYSTORE_PASSWORD:oracle_4U}
+  # truststore-path: ${STANCHART_TRUSTSTORE_PATH:}
+  # truststore-password: ${STANCHART_TRUSTSTORE_PASSWORD:changeit}

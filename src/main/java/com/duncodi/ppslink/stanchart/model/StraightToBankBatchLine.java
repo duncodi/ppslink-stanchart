@@ -47,6 +47,9 @@ public class StraightToBankBatchLine implements Serializable {
     @Column(name = "payment_currency_code")
     private String paymentCurrencyCode;
 
+    @Column(name = "base_currency_code")
+    private String baseCurrencyCode;
+
     @Column(name = "purpose_of_payment")
     private String purposeOfPayment;
 
@@ -125,7 +128,7 @@ public class StraightToBankBatchLine implements Serializable {
     @Column(name = "beneficiary_country_name")
     private String beneficiaryCountryName;
 
-    @Column(name = "json_request", length = 65535)
+    @Column(name = "json_request", columnDefinition = "TEXT")
     @Lob
     private String jsonRequest;
 

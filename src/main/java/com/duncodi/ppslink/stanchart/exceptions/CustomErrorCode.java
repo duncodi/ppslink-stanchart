@@ -14,6 +14,8 @@ public enum CustomErrorCode {
     INCOMPLETE_REQUEST("Incomplete Request Parameters"),
     NO_TOKEN("No Token"),
     INVALID_TOKEN("Invalid Token"),
+    CONNECTION_ERROR("Failed to Connect"),
+    INVALID_JSON("Invalid Json File Structure"),
     ;
 
     private String name;

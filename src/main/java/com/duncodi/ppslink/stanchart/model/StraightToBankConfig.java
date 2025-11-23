@@ -21,7 +21,7 @@ public class StraightToBankConfig implements Serializable {
     @GeneratedValue(strategy = GenerationType.AUTO)
     private Long id;
 
-    @Column(name = "activation_key", length = 65535)
+    @Column(name = "activation_key", columnDefinition = "TEXT")
     @Lob
     private String activationKey;
 
@@ -38,6 +38,12 @@ public class StraightToBankConfig implements Serializable {
 
     @Column(name = "api_url")
     private String apiUrl;
+
+    @Column(name = "pmt_initiation_end_point")
+    private String paymentInitiationEndPoint;
+
+    @Column(name = "pmt_status_end_point")
+    private String paymentStatusEndPoint;
 
     @Column(name = "jwt_issuer")
     private String jwtIssuer;

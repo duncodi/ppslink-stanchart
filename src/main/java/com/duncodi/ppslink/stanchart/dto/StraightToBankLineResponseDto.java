@@ -22,6 +22,7 @@ public class StraightToBankLineResponseDto {
     private Long currencyId;
 
     private String paymentCurrencyCode;
+    private String baseCurrencyCode;
     private String purposeOfPayment;
     private String forexType;
     private String forexDealNo;

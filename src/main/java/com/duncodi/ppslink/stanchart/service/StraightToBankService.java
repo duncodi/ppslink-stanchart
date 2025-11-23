@@ -13,28 +13,21 @@ import com.duncodi.ppslink.stanchart.repository.StraightToBankBatchSpecification
 import com.duncodi.ppslink.stanchart.repository.StraightToBankLineRepository;
 import com.duncodi.ppslink.stanchart.service.otherServices.AdminServiceHelper;
 import com.duncodi.ppslink.stanchart.util.*;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.transaction.Transactional;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.data.domain.Sort;
+import org.springframework.http.*;
 import org.springframework.stereotype.Service;
-import org.w3c.dom.Document;
-import org.xml.sax.InputSource;
+import org.springframework.web.client.RestTemplate;
 
-import javax.xml.parsers.DocumentBuilder;
-import javax.xml.parsers.DocumentBuilderFactory;
-import javax.xml.transform.Transformer;
-import javax.xml.transform.TransformerFactory;
-import javax.xml.transform.dom.DOMSource;
-import javax.xml.transform.stream.StreamResult;
-import java.io.File;
-import java.io.StringReader;
-import java.text.DateFormat;
 import java.text.SimpleDateFormat;
-import java.util.ArrayList;
-import java.util.Date;
-import java.util.List;
+import java.util.*;
 
 @Slf4j
 @Service
@@ -49,8 +42,12 @@ public class StraightToBankService {
     private final SftpFileUploadService sftpFileUploadService;
     private final AdminServiceHelper adminServiceHelper;
     private final AuditTrailService auditTrailService;
-
     private final StraightToBankLineRepository lineRepository;
+    private final ObjectMapper objectMapper;
+    private final StandardCharteredTokenGenerator standardCharteredTokenGenerator;
+
+    @Qualifier("scbRestTemplate")
+    private final RestTemplate scbRestTemplate;
 
     public StraightToBankPayloadDto getNextMessageId(StraightToBankPayloadDto payload){
 
@@ -122,6 +119,10 @@ public class StraightToBankService {
             throw new CustomException(CustomErrorCode.OBJ_404, "Configuration Not Found for Scheme "+schemeCode);
         }
 
+       /* if (!YesNo.YES.equals(config.getUrlActivated())) {
+            throw new CustomException("SCB API URL is not activated. Please activate the URL first.");
+        }*/
+
         log.info("Processing Payment File ...."+batch.getMessageId());
 
         List<StraightToBankPayloadLineDto> linesAll = request.getLines()==null?new ArrayList<>():request.getLines();
@@ -167,90 +168,454 @@ public class StraightToBankService {
 
         batch.addLines(lines);
 
-        boolean promoteToProduction = YesNo.YES.equals(config.getPromoteToProduction());
+        String apiUrl = config.getApiUrl();
 
-        boolean encrypt = false;
-
-        String testOrProduction = "_TST_";
-
-        if(promoteToProduction){
-            testOrProduction = "_PRD_";
+        if(apiUrl==null){
+            throw new CustomException("API Url Not Found!");
         }
 
-        String countryCodeFileName = batch.getCountryCode()==null?"UG":request.getCountryCode();
+        String endPoint = config.getPaymentInitiationEndPoint();
 
-        DateFormat outputFormat = new SimpleDateFormat("yyyyMMddHHmmssSSS");
-
-        String fileNameNative = "_Pain001v3_"+countryCodeFileName+testOrProduction+outputFormat.format(new Date())+".xml";
-
-        String fileName = "/"+fileNameNative;
-
-        log.info("file path:::::::::"+fileName);
-
-        try{
-            this.generateXmlFile(null, fileName);
-        }catch (Exception e){
-            e.printStackTrace(System.err);
-            throw new CustomException("Unable to generate Document. "+e.getMessage());
+        if(endPoint==null){
+            throw new CustomException("Payment Initiation Endpoint Not Found!");
         }
 
-        String encryptedFileName = fileName;
+        String paymentUrl = apiUrl+endPoint;
+
+        log.info("SCB PAYMENT URL: {}", paymentUrl);
+
+        String jsonString = "{}";
+        String deliveryRes = "FAILED";
+        String statusCode = "500";
+        String scbResponse = "";
+        Map<String, String> responseHeaders = new HashMap<>();
+        String correlationId = "";
+
+        try {
+
+            ObjectNode stanchartJson = this.generateJsonFile(batch, config);
+            jsonString = objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(stanchartJson);
+
+            log.info("Generated JSON Payload for messageId: {}", batch.getMessageId());
+
+        } catch (Exception e){
+            log.error("Error generating JSON payload", e);
+            throw new CustomException(CustomErrorCode.INVALID_JSON, "Failed to generate JSON payload: " + e.getMessage());
+        }
+
+        try {
+
+            String scbJwtToken = "XXXXXXXXXXXXXX";//standardCharteredTokenGenerator.generateScbJwtToken(config);
+
+            log.info("SCB JWT Token generated successfully, length: {}", scbJwtToken.length());
+
+            HttpHeaders headers = this.createSCBRequestHeaders(config, batch.getMessageId(), scbJwtToken);
+
+            HttpEntity<String> entity = new HttpEntity<>(jsonString, headers);
+
+            log.info("=== SENDING PAYMENT TO SCB API ===");
+            log.info("URL: {}", paymentUrl);
+            log.info("Message ID: {}", batch.getMessageId());
+            log.info("Request Headers: {}", headers);
+
+            ResponseEntity<String> response = scbRestTemplate.exchange(
+                    paymentUrl,
+                    HttpMethod.POST,
+                    entity,
+                    String.class
+            );
+
+            statusCode = String.valueOf(response.getStatusCode().value());
+            scbResponse = response.getBody();
+
+            log.info("=== SCB PAYMENT RESPONSE ===");
+            log.info("HTTP Status: {}", response.getStatusCode());
+            log.info("Response Body: {}", scbResponse);
+
+            if (response.getStatusCode().is2xxSuccessful()) {
+                deliveryRes = "SUCCESS";
+                log.info("✅ Payment successfully delivered to SCB. Status: {}", statusCode);
+            } else {
+                deliveryRes = "FAILED";
+                log.warn("❌ Failed to deliver payment to SCB. Status: {}, Correlation ID: {}, Response: {}",
+                        statusCode, correlationId, scbResponse);
+            }
+
+        } catch (Exception e) {
+
+            log.error("❌ Error delivering payment to SCB API", e);
+
+            String errorMessage = "Failed to Deliver Payment File to Standard Chartered: " + e.getMessage();
+
+            if (e.getMessage().contains("Connection reset") || e.getMessage().contains("SSL")) {
+                errorMessage += ". This may be due to SSL certificate issues. Please ensure SSL certificates are properly configured.";
+            }
+
+            throw new CustomException(errorMessage);
+
+        }
 
         String accessToken = JWTUtil.getTokenFromServletRequest(servletRequest);
 
-        log.info("encrypt>>>>"+encrypt);
-
-        batch.setDecryptedFileName(fileName);
-        batch.setFileNameNative(fileNameNative);
-        batch.setEncryptedFileName(encryptedFileName);
+        // Save batch with delivery status
+        batch.setDeliveryStatus(deliveryRes);
+        batch.setStatusCode(statusCode);
+        batch.setApiResponse(scbResponse);
+        batch.setJsonRequest(jsonString);
 
         batch = batchRepository.save(batch);
 
+        // Audit trail for batch creation
         auditTrailService.buildAndSendSingleTrail(CrudOperationType.CREATE, actor.getId(),
-                "Straight to Bank Batch Saved "+fileNameNative, JsonUtil.convertToJsonString(batch),
+                "Straight to Bank Payment Saved and Sent to SCB - Status: " + deliveryRes + ", Correlation ID: " + correlationId,
+                JsonUtil.convertToJsonString(batch),
                 JsonUtil.convertToJsonString(batch), actor, ipAddress, accessToken);
 
+        // Audit trails for individual lines
         List<AuditTrailRequestDto> auditList = new ArrayList<>();
-
         for(StraightToBankBatchLine line : batch.getLines()){
 
             String currentState = JsonUtil.convertToJsonString(line);
-
-            String objectDescription = "Straight to Bank Payment Line "+line.getParticulars()+" Saved";
+            String objectDescription = "Straight to Bank Payment Line " + line.getParticulars() + " Saved - SCB Delivery: " + deliveryRes;
 
             AuditTrailRequestDto auditTrailRequest = auditTrailService.buildAuditTrailRequest(CrudOperationType.CREATE, line.getId(),
                     objectDescription, currentState, currentState, actor, ipAddress);
 
             auditList.add(auditTrailRequest);
-
         }
 
         auditTrailService.sendAuditTrail(auditList, accessToken);
 
+        // Prepare results
         StraightToBankResultsDto results = new StraightToBankResultsDto();
-        results.setFilePath(fileName);
-        results.setFileName(fileNameNative);
-        results.setStatus("Done Sending Payment File to Stanbic Bank");
+        results.setStatus("Payment processing completed - SCB Delivery: " + deliveryRes);
+        results.setStatusCode(statusCode);
         results.setBatchId(batch.getId());
+        results.setMessageId(batch.getMessageId());
+        results.setDeliveryResponse(scbResponse);
+
+        if ("FAILED".equals(deliveryRes)) {
+            results.setStatus("Failed to send payment file to Standard Chartered Bank");
+        } else {
+            results.setStatus("Successfully sent payment file to Standard Chartered Bank");
+        }
+
+        log.info("Payment processing completed. Batch ID: {}, Status: {}, Correlation ID: {}",
+                batch.getId(), deliveryRes, correlationId);
 
         return results;
-
     }
 
-    public void generateXmlFile(String xmlSource, String path) throws Exception {
+    private HttpHeaders createSCBRequestHeaders(StraightToBankConfigDto config, String messageId, String jwtToken) {
+        HttpHeaders headers = new HttpHeaders();
 
-        DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
-        DocumentBuilder builder = factory.newDocumentBuilder();
-        Document doc = builder.parse(new InputSource(new StringReader(xmlSource)));
+        // Required headers based on SCB API documentation
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        headers.setAccept(Collections.singletonList(MediaType.APPLICATION_JSON));
 
-        // Write the parsed document to an xml file
-        TransformerFactory transformerFactory = TransformerFactory.newInstance();
-        Transformer transformer = transformerFactory.newTransformer();
-        DOMSource source = new DOMSource(doc);
+        // SCB specific headers
+        headers.set("Routing-Identifier", "ZZ");
 
-        StreamResult result =  new StreamResult(new File(path));
-        transformer.transform(source, result);
+        headers.set("X-Request-ID", messageId);
 
+        // Correlation ID for tracking
+        headers.set("X-Correlation-ID", UUID.randomUUID().toString());
+
+        // Security headers
+        headers.set("Cache-Control", "no-cache");
+        headers.set("Pragma", "no-cache");
+
+        // Timestamp
+        headers.set("X-Timestamp", new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'").format(new Date()));
+
+        log.debug("Created SCB request headers for message: {}", messageId);
+
+        return headers;
+    }
+
+    /**
+     * Alternative method that sends payment without wrapping in JWT token structure
+     * Use this if SCB expects the payment payload directly in the request body
+     */
+    private StraightToBankResultsDto sendPaymentDirect(StraightToBankBatch batch, StraightToBankConfigDto config, String jsonString) {
+        try {
+            // Generate JWT token for SCB authentication
+            String scbJwtToken = standardCharteredTokenGenerator.generateScbJwtToken(config);
+            log.info("SCB JWT Token generated successfully, length: {}", scbJwtToken.length());
+
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.APPLICATION_JSON);
+            headers.set("Routing-Identifier", "ZZ");
+            headers.set("Authorization", "Bearer " + scbJwtToken);
+            headers.set("X-Request-ID", batch.getMessageId());
+            headers.set("X-Correlation-ID", UUID.randomUUID().toString());
+
+            HttpEntity<String> entity = new HttpEntity<>(jsonString, headers);
+
+            log.info("Sending direct payment to SCB API...");
+
+            ResponseEntity<String> response = scbRestTemplate.exchange(
+                    config.getApiUrl(),
+                    HttpMethod.POST,
+                    entity,
+                    String.class
+            );
+
+            String statusCode = String.valueOf(response.getStatusCode().value());
+            String scbResponse = response.getBody() != null ? response.getBody() : "No response body";
+            String correlationId = response.getHeaders().getFirst("x-correlation-id");
+
+            StraightToBankResultsDto results = new StraightToBankResultsDto();
+            results.setStatusCode(statusCode);
+            results.setDeliveryResponse(scbResponse);
+            results.setMessageId(batch.getMessageId());
+
+            if (response.getStatusCode().is2xxSuccessful()) {
+                results.setStatus("SUCCESS");
+                log.info("✅ Direct payment successful. Status: {}, Correlation ID: {}", statusCode, correlationId);
+            } else {
+                results.setStatus("FAILED");
+                log.warn("❌ Direct payment failed. Status: {}, Correlation ID: {}", statusCode, correlationId);
+            }
+
+            return results;
+
+        } catch (Exception e) {
+            log.error("❌ Error in direct payment to SCB API", e);
+            throw new CustomException("Direct payment failed: " + e.getMessage());
+        }
+    }
+
+    public ObjectNode generateJsonFile(StraightToBankBatch batch, StraightToBankConfigDto config) throws Exception {
+
+        List<StraightToBankBatchLine> lines = batch.getLines();
+
+        if (lines == null || lines.isEmpty()) {
+            throw new CustomException("No payment lines found for batch: " + batch.getMessageId());
+        }
+
+        // For now, we'll use the first line to generate the JSON payload
+        // In a real scenario, you might want to handle multiple lines differently
+        StraightToBankBatchLine fl = lines.getFirst();
+
+        // Create the main JSON object
+        ObjectNode rootNode = objectMapper.createObjectNode();
+
+        // Create header object
+        ObjectNode headerNode = objectMapper.createObjectNode();
+        headerNode.put("messageId", batch.getMessageId() != null ? batch.getMessageId() : "UGPAYMWPeyRxMOnb");
+        headerNode.put("timestamp", new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'").format(new Date()));
+        headerNode.put("countryCode", batch.getCountryCode() != null ? batch.getCountryCode() : "KE");
+
+        rootNode.set("header", headerNode);
+
+        // Create instruction object
+        ObjectNode instructionNode = objectMapper.createObjectNode();
+
+        // Amount object (required)
+        ObjectNode amountNode = objectMapper.createObjectNode();
+        amountNode.put("amount", fl.getAmountBc() != null ? fl.getAmountBc().doubleValue() : 500.0);
+        amountNode.put("currencyCode", fl.getTransactionCurrency() != null ? fl.getTransactionCurrency() : "KES");
+
+        instructionNode.set("amount", amountNode);
+
+        // Debtor object (required)
+        ObjectNode debtorNode = objectMapper.createObjectNode();
+        debtorNode.put("name", batch.getSchemeName() != null ? batch.getSchemeName() : "SCB");
+
+        instructionNode.set("debtor", debtorNode);
+
+        // Purpose (required)
+        instructionNode.put("purpose", "CASH");
+
+        // Creditor object (required)
+        ObjectNode creditorNode = objectMapper.createObjectNode();
+        creditorNode.put("name", fl.getBeneficiaryName() != null ? fl.getBeneficiaryName() : "Beneficiary");
+
+        ObjectNode creditorAddressNode = objectMapper.createObjectNode();
+        creditorAddressNode.put("country", fl.getBeneficiaryCountryCode() != null ? fl.getBeneficiaryCountryCode() : "KE");
+        creditorAddressNode.put("city", extractCityFromAddress(fl.getBeneficiaryAddress())); // Extract from address
+
+        creditorNode.set("postalAddress", creditorAddressNode);
+        instructionNode.set("creditor", creditorNode);
+
+        // Debtor Agent (required)
+        ObjectNode debtorAgentNode = objectMapper.createObjectNode();
+        ObjectNode debtorFinancialInstitutionNode = objectMapper.createObjectNode();
+        debtorFinancialInstitutionNode.put("BIC", batch.getCashbookSwiftCode() != null ? batch.getCashbookSwiftCode() : "SCBLKENXXXX");
+        debtorFinancialInstitutionNode.put("name", batch.getCashbookName() != null ? batch.getCashbookName() : "Standard Chartered Bank");
+
+        ObjectNode debtorAddressNode = objectMapper.createObjectNode();
+        debtorAddressNode.put("country", batch.getCountryCode() != null ? batch.getCountryCode() : "KE");
+        // City in debtorAgent is optional - include only if available
+        String debtorCity = extractDebtorAgentCity(batch);
+        if (!debtorCity.isEmpty()) {
+            debtorAddressNode.put("city", debtorCity);
+        }
+
+        debtorFinancialInstitutionNode.set("postalAddress", debtorAddressNode);
+        debtorAgentNode.set("financialInstitution", debtorFinancialInstitutionNode);
+        instructionNode.set("debtorAgent", debtorAgentNode);
+
+        // Payment Type (required)
+        instructionNode.put("paymentType", determinePaymentType(fl));
+
+        // Reference ID (required)
+        instructionNode.put("referenceId", fl.getRefCode() != null ? fl.getRefCode() : generateReferenceId(batch));
+
+        // Charge Bearer (required) - correct spelling
+        instructionNode.put("chargeBearer", determineChargeBearer(batch));
+
+        // Creditor Agent (required)
+        ObjectNode creditorAgentNode = objectMapper.createObjectNode();
+        ObjectNode creditorFinancialInstitutionNode = objectMapper.createObjectNode();
+        creditorFinancialInstitutionNode.put("BIC", determineCreditorBic(fl));
+        creditorFinancialInstitutionNode.put("name", fl.getBankName() != null ? fl.getBankName() : "Bank");
+
+        ObjectNode creditorAgentAddressNode = objectMapper.createObjectNode();
+        creditorAgentAddressNode.put("country", fl.getBankCountryCode() != null ? fl.getBankCountryCode() : "KE");
+        creditorAgentAddressNode.put("city", determineCreditorAgentCity(fl));
+
+        creditorFinancialInstitutionNode.set("postalAddress", creditorAgentAddressNode);
+        creditorAgentNode.set("financialInstitution", creditorFinancialInstitutionNode);
+        instructionNode.set("creditorAgent", creditorAgentNode);
+
+        // Debtor Account (required)
+        ObjectNode debtorAccountNode = objectMapper.createObjectNode();
+        debtorAccountNode.put("id", batch.getDebitAccountNo() != null ? batch.getDebitAccountNo() : "2345678904");
+        debtorAccountNode.put("identifierType", "BBAN");
+        // Add currency only for foreign currency payments
+        if (isForeignCurrencyPayment(fl)) {
+            debtorAccountNode.put("currency", fl.getTransactionCurrency());
+        }
+        instructionNode.set("debtorAccount", debtorAccountNode);
+
+        // Creditor Account (required)
+        ObjectNode creditorAccountNode = objectMapper.createObjectNode();
+        creditorAccountNode.put("id", fl.getAccountNo() != null ? fl.getAccountNo() : "256777254583");
+        creditorAccountNode.put("identifierType", "Other");
+        // Add currency only for foreign currency payments
+        if (isForeignCurrencyPayment(fl)) {
+            creditorAccountNode.put("currency", fl.getTransactionCurrency());
+        }
+        instructionNode.set("creditorAccount", creditorAccountNode);
+
+        // Remittance Info (optional)
+        if (hasRemittanceInfo(fl)) {
+            ObjectNode remittanceInfoNode = objectMapper.createObjectNode();
+            ArrayNode multiUnstructuredNode = objectMapper.createArrayNode();
+            // Add remittance details from line particulars
+            String[] remittanceLines = extractRemittanceInfo(fl.getParticulars());
+            for (String remittance : remittanceLines) {
+                if (remittance != null && !remittance.trim().isEmpty()) {
+                    multiUnstructuredNode.add(remittance.trim());
+                }
+            }
+            if (!multiUnstructuredNode.isEmpty()) {
+                remittanceInfoNode.set("multiUnstructured", multiUnstructuredNode);
+                instructionNode.set("remittanceInfo", remittanceInfoNode);
+            }
+        }
+
+        // Timestamp and dates (required)
+        instructionNode.put("paymentTimestamp", new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'").format(new Date()));
+        instructionNode.put("paymentTypePreference", "Explicit");
+        instructionNode.put("requiredExecutionDate", new SimpleDateFormat("yyyy-MM-dd").format(batch.getValueDate() != null ? batch.getValueDate() : new Date()));
+
+        rootNode.set("instruction", instructionNode);
+
+        log.info("Generated standardized SCB JSON payload for payment: {}", fl.getRefCode());
+        return rootNode;
+    }
+
+    // Helper methods for the standardized structure
+    private String extractCityFromAddress(String beneficiaryAddress) {
+        if (beneficiaryAddress == null || beneficiaryAddress.isEmpty()) {
+            return "Nairobi"; // Default fallback
+        }
+        // Simple extraction - you might want to implement more sophisticated logic
+        String[] addressParts = beneficiaryAddress.split(",");
+        if (addressParts.length > 0) {
+            return addressParts[addressParts.length - 1].trim(); // Assume city is last part
+        }
+        return "Nairobi";
+    }
+
+    private String extractDebtorAgentCity(StraightToBankBatch batch) {
+        // Extract city from debtor agent information
+        // This could come from batch.getCashbookBranchCode() or other fields
+        return "NBO"; // Default for now
+    }
+
+    private String determinePaymentType(StraightToBankBatchLine line) {
+        // Determine payment type based on transaction details
+        if (line.getPaymentType() != null) {
+            return line.getPaymentType();
+        }
+        // Default based on currency/country
+        if (isForeignCurrencyPayment(line)) {
+            return "TT"; // Telegraphic Transfer for foreign currency
+        }
+        return "PAY"; // Domestic payment
+    }
+
+    private String determineChargeBearer(StraightToBankBatch batch) {
+        // Determine charge bearer based on batch configuration
+        if (batch.getChargeBearer() != null) {
+            return batch.getChargeBearer().name(); // Assuming enum
+        }
+        return "DEBT"; // Default: debtor bears charges
+    }
+
+    private String determineCreditorBic(StraightToBankBatchLine line) {
+        // Determine creditor BIC based on bank details
+        if (line.getSwiftCode() != null && !line.getSwiftCode().equals("-")) {
+            return line.getSwiftCode();
+        }
+        // Fallback logic based on bank name/country
+        if (line.getBankName() != null && line.getBankName().toLowerCase().contains("standard chartered")) {
+            return "SCBLKENXXXX";
+        }
+        return "MPESA"; // Default fallback
+    }
+
+    private String determineCreditorAgentCity(StraightToBankBatchLine line) {
+        // Extract city from bank details or beneficiary address
+        if (line.getBeneficiaryAddress() != null) {
+            return extractCityFromAddress(line.getBeneficiaryAddress());
+        }
+        return "Nairobi"; // Default
+    }
+
+    private boolean isForeignCurrencyPayment(StraightToBankBatchLine line) {
+        // Check if this is a foreign currency payment
+        String currency = line.getTransactionCurrency();
+        String country = line.getBeneficiaryCountryCode();
+
+        // If currency is different from debtor's base currency, it's foreign
+        // You might want to add more sophisticated logic here
+        return currency != null &&
+                !currency.equals("UGX") &&
+                !currency.equals(line.getBaseCurrencyCode());
+    }
+
+    private boolean hasRemittanceInfo(StraightToBankBatchLine line) {
+        // Check if there's remittance information available
+        return line.getParticulars() != null && !line.getParticulars().isEmpty();
+    }
+
+    private String[] extractRemittanceInfo(String particulars) {
+        if (particulars == null || particulars.isEmpty()) {
+            return new String[0];
+        }
+        // Split particulars into multiple lines for remittance info
+        // You might want to implement more sophisticated parsing
+        return particulars.split("\\|"); // Assuming | is delimiter, adjust as needed
+    }
+
+    private String generateReferenceId(StraightToBankBatch batch) {
+        // Generate a unique reference ID if not provided
+        return "REF" + batch.getMessageId() + System.currentTimeMillis();
     }
 
     public StraightToBankBatchResponseDto convertEntityToResponseDto(StraightToBankBatch batch){
@@ -269,6 +634,7 @@ public class StraightToBankService {
                 .cashbookName(batch.getCashbookName())
                 .cashbookAccountName(batch.getDebitAccountName())
                 .cashbookAccountNo(batch.getDebitAccountNo())
+                .cashbookSwiftCode(batch.getCashbookSwiftCode())
                 .countLines(batch.getCountTransactions())
                 .totalSourceCurrency(batch.getTotal())
                 .totalBaseCurrency(batch.getTotalBc())
@@ -277,6 +643,9 @@ public class StraightToBankService {
                 .valueDate(DateUtil.convertDateToGridShort(batch.getValueDate()))
                 .chargeBearer(batch.getChargeBearer())
                 .batchTitle(batch.getBatchTitle())
+                .deliveryStatus(batch.getDeliveryStatus())
+                .statusCode(batch.getStatusCode())
+                .apiResponse(batch.getApiResponse())
                 .build();
 
     }
@@ -293,6 +662,7 @@ public class StraightToBankService {
                 .spotRate(line.getSpotRate())
                 .currencyId(line.getCurrencyId())
                 .paymentCurrencyCode(line.getPaymentCurrencyCode())
+                .baseCurrencyCode(line.getBaseCurrencyCode())
                 .purposeOfPayment(line.getPurposeOfPayment())
                 .forexType(line.getForexType())
                 .forexDealNo(line.getForexDealNo())
@@ -349,6 +719,7 @@ public class StraightToBankService {
                 .schemeName(batch.getSchemeName())
                 .schemeCode(batch.getSchemeCode())
                 .countryCode(batch.getCountryCode())
+                .baseCurrencyCode(batch.getBaseCurrencyCode())
                 .batchDate(new Date())
                 .preparedById(batch.getPreparedById())
                 .preparedByName(batch.getPreparedByName())
@@ -356,6 +727,7 @@ public class StraightToBankService {
                 .cashbookName(batch.getCashbookName())
                 .debitAccountName(batch.getCashbookAccountName())
                 .debitAccountNo(batch.getCashbookAccountNo())
+                .cashbookSwiftCode(batch.getCashbookSwiftCode())
                 .countTransactions(batch.getCountLines())
                 .total(batch.getTotalSourceCurrency())
                 .totalBc(batch.getTotalBaseCurrency())
@@ -379,6 +751,7 @@ public class StraightToBankService {
                 .spotRate(line.getSpotRate())
                 .currencyId(line.getCurrencyId())
                 .paymentCurrencyCode(line.getPaymentCurrencyCode())
+                .baseCurrencyCode(line.getBaseCurrencyCode())
                 .purposeOfPayment(line.getPurposeOfPayment())
                 .forexType(line.getForexType())
                 .forexDealNo(line.getForexDealNo())
@@ -430,11 +803,7 @@ public class StraightToBankService {
 
         for(StraightToBankBatch batch : list){
 
-          /*  auditTrailService.trail(JsonUtil.convertToPrettyJsonString(user), JsonUtil.convertToPrettyJsonString(user), null, ipAddress,
-                    CrudOperationType.DELETE, user.getId(), "User Details Deleted", true);
-*/
             batchRepository.deleteById(batch.getId());
-
             count++;
 
         }

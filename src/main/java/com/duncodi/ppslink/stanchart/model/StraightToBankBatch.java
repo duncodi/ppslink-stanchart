@@ -53,6 +53,9 @@ public class StraightToBankBatch implements Serializable {
     @Column(name = "country_code")
     private String countryCode;
 
+    @Column(name = "base_currency_code")
+    private String baseCurrencyCode;
+
     @Column(name = "recall_initiated_by_id")
     private Long recallInitiatedById;
 
@@ -98,6 +101,9 @@ public class StraightToBankBatch implements Serializable {
     @Column(name = "count_transactions")
     private Integer countTransactions;
 
+    @Column(name = "cashbook_swift_code")
+    private String cashbookSwiftCode;
+
     @Column(name = "total")
     private BigDecimal total;
 
@@ -131,6 +137,21 @@ public class StraightToBankBatch implements Serializable {
 
     @Column(name = "file_name_native")
     private String fileNameNative;
+
+    @Column(name = "json_request", columnDefinition = "TEXT")
+    @Lob
+    private String jsonRequest;
+
+    @Column(name = "delivery_status")
+    private String deliveryStatus;
+
+    @Column(name = "status_code")
+    private String statusCode;
+
+    @Column(name = "api_response", columnDefinition = "TEXT")
+    @Lob
+    private String apiResponse;
+
 
     @Builder.Default
     @OneToMany(mappedBy = "batch", cascade = CascadeType.ALL, orphanRemoval = true)

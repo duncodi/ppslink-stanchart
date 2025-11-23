@@ -27,6 +27,8 @@ public class StraightToBankPayloadLineDto {
 
     private String paymentCurrencyCode;
 
+    private String baseCurrencyCode;
+
     private String purposeOfPayment;
 
     private String forexType;

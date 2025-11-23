@@ -3,6 +3,8 @@ package com.duncodi.ppslink.stanchart.dto;
 import com.duncodi.ppslink.stanchart.enums.StraightToBankChargeBearer;
 import com.duncodi.ppslink.stanchart.enums.StraightToBankInstructionPriority;
 import com.duncodi.ppslink.stanchart.enums.YesNo;
+import jakarta.persistence.Column;
+import jakarta.persistence.Lob;
 import lombok.*;
 
 import java.math.BigDecimal;
@@ -83,5 +85,10 @@ public class StraightToBankBatchResponseDto {
     private String decryptedFileName;
     private String encryptedFileName;
     private String fileNameNative;
+
+    private String jsonRequest;
+    private String deliveryStatus;
+    private String statusCode;
+    private String apiResponse;
 
 }
