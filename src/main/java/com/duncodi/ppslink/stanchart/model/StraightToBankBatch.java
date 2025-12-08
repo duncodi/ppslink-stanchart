@@ -95,8 +95,14 @@ public class StraightToBankBatch implements Serializable {
     @Column(name = "debit_account_name")
     private String debitAccountName;
 
+    @Column(name = "debit_bank_name")
+    private String debitBankName;
+
     @Column(name = "debit_account_no")
     private String debitAccountNo;
+
+    @Column(name = "debit_account_town")
+    private String debitAccountTown;
 
     @Column(name = "count_transactions")
     private Integer countTransactions;

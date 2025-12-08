@@ -52,6 +52,10 @@ public class StraightToBankBatchResponseDto {
 
     private String cashbookAccountName;
 
+    private String debitAccountTown;
+
+    private String debitBankName;
+
     private String cashbookBranchCode;
 
     private String cashbookBankCode;

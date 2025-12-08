@@ -4,6 +4,9 @@ server:
 spring:
   application:
     name: stanchart-service
+  autoconfigure:
+    exclude:
+      - org.springframework.boot.autoconfigure.http.client.HttpClientAutoConfiguration
   datasource:
     url: ${DB_URL}
     username: ${DB_USERNAME}
@@ -29,6 +32,9 @@ logging:
     root: INFO
     org.springframework: INFO
     org.hibernate.SQL: OFF
+    com.duncodi.ppslink.stanchart: DEBUG
+    org.apache.http: DEBUG
+    javax.net.ssl: DEBUG
 
 eureka:
   client:
@@ -39,10 +45,13 @@ admin:
   service:
     url: http://api-gateway:8080/admin/api/v1
 
-
-scbkeys:
-  private-key-path: ${STANCHART_PRIVATE_KEY_PATH:/etc/ppslinkkeys/stanchart_bank_certs/www.pps.go.ug_private.pem}
-  keystore-path: ${STANCHART_KEYSTORE_PATH:/etc/ppslinkkeys/stanchart_bank_certs/www.pps.go.ug.p12}
-  keystore-password: ${STANCHART_KEYSTORE_PASSWORD:oracle_4U}
-  # truststore-path: ${STANCHART_TRUSTSTORE_PATH:}
-  # truststore-password: ${STANCHART_TRUSTSTORE_PASSWORD:changeit}
+# SCB Configuration - Using PEM private key for JWT and JKS for SSL
+scb:
+  ssl:
+    keystore:
+      path: ${STANCHART_KEYSTORE_PATH:/etc/ppslinkkeys/StanChartKeys/scbapibanking.jks}
+      password: ${STANCHART_KEYSTORE_PASSWORD:PPSL1nk2025}
+      type: JKS
+  jwt:
+    private-key:
+      path: ${STANCHART_PRIVATE_KEY_PATH:/etc/ppslinkkeys/StanChartKeys/scbapibankingprivatekey.pem}

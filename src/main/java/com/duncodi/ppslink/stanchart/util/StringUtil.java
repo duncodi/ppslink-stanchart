@@ -87,6 +87,8 @@ public class StringUtil {
         text = text.replace(">", "");
         text = text.replace("?", "");
 
+        text = StringUtil.removeDoubleSpace(text);
+
         return text;
 
     }
@@ -98,6 +100,16 @@ public class StringUtil {
         for (int i = 0; i < len; i++)
             sb.append(chars.charAt(rnd.nextInt(chars.length())));
         return sb.toString();
+    }
+
+    public static String removeDoubleSpace(String input){
+
+        input = input==null?"":input;
+
+        String cleaned = input.replaceAll("\\s+", " ").trim();
+
+        return cleaned;
+
     }
 
 }

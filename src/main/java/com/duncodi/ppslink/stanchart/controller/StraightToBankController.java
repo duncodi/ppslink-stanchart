@@ -29,7 +29,7 @@ public class StraightToBankController{
             StraightToBankResultsDto res = service.process(request, servletRequest);
 
             return ResponseEntity.status(HttpStatus.CREATED).body(ApiResponse.success("Straight to Bank Payment File Submitted for " +
-                    "Processing", res));
+                    "Processing: "+res.getFullResult(), res));
 
         }catch (CustomException e){
             e.printStackTrace(System.err);

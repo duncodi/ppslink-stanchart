@@ -73,6 +73,8 @@ public class StraightToBankPayloadLineDto {
 
     private String beneficiaryAddress;
 
+    private String beneficiaryTown;
+
     private String beneficiaryCountryCode;
 
     private String beneficiaryCountryName;

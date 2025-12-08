@@ -16,5 +16,6 @@ public class StraightToBankResultsDto {
     private String deliveryResponse;
     private String messageId;
     private Long batchId;
+    private String fullResult;
 
 }

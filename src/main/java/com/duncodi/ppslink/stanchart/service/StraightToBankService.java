@@ -26,6 +26,7 @@ import org.springframework.http.*;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
 
+import java.math.BigDecimal;
 import java.text.SimpleDateFormat;
 import java.util.*;
 
@@ -193,7 +194,7 @@ public class StraightToBankService {
 
         try {
 
-            ObjectNode stanchartJson = this.generateJsonFile(batch, config);
+            ObjectNode stanchartJson = this.generateJsonFile(batch);
             jsonString = objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(stanchartJson);
 
             log.info("Generated JSON Payload for messageId: {}", batch.getMessageId());
@@ -205,9 +206,34 @@ public class StraightToBankService {
 
         try {
 
-            String scbJwtToken = "XXXXXXXXXXXXXX";//standardCharteredTokenGenerator.generateScbJwtToken(config);
+            log.info("jsonString:::::::::::"+jsonString);
 
-            log.info("SCB JWT Token generated successfully, length: {}", scbJwtToken.length());
+            String scbJwtToken;
+
+            try{
+                scbJwtToken = standardCharteredTokenGenerator.generateScbJwtToken(config);
+                log.info("SCB JWT Token generated successfully, length: {}", scbJwtToken.length());
+                log.info("JWT Token preview: {}...", scbJwtToken.substring(0, Math.min(50, scbJwtToken.length())));
+
+                // DEBUG: Decode and log JWT payload for verification
+                try {
+                    String[] jwtParts = scbJwtToken.split("\\.");
+                    if (jwtParts.length >= 2) {
+                        String payloadJson = new String(Base64.getUrlDecoder().decode(jwtParts[1]));
+                        log.info("🔍 JWT PAYLOAD DECODED: {}", payloadJson);
+
+                        // Pretty print the JSON for better readability
+                        Object payloadObject = objectMapper.readValue(payloadJson, Object.class);
+                        String prettyPayload = objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(payloadObject);
+                        log.info("🔍 JWT PAYLOAD PRETTY:\n{}", prettyPayload);
+                    }
+                } catch (Exception e) {
+                    log.warn("Could not decode JWT payload for debugging: {}", e.getMessage());
+                }
+            } catch (Exception e){
+                log.error("Failed to generate JWT token", e);
+                throw new CustomException("Failed to generate authentication token: " + e.getMessage());
+            }
 
             HttpHeaders headers = this.createSCBRequestHeaders(config, batch.getMessageId(), scbJwtToken);
 
@@ -227,9 +253,11 @@ public class StraightToBankService {
 
             statusCode = String.valueOf(response.getStatusCode().value());
             scbResponse = response.getBody();
+            correlationId = response.getHeaders().getFirst("X-Correlation-ID");
 
             log.info("=== SCB PAYMENT RESPONSE ===");
             log.info("HTTP Status: {}", response.getStatusCode());
+            log.info("Correlation ID: {}", correlationId);
             log.info("Response Body: {}", scbResponse);
 
             if (response.getStatusCode().is2xxSuccessful()) {
@@ -294,6 +322,10 @@ public class StraightToBankService {
         results.setMessageId(batch.getMessageId());
         results.setDeliveryResponse(scbResponse);
 
+        String fullResult = "["+results.getStatusCode()+"] "+results.getStatus()+" - Resp: "+results.getDeliveryResponse();
+
+        results.setFullResult(fullResult);
+
         if ("FAILED".equals(deliveryRes)) {
             results.setStatus("Failed to send payment file to Standard Chartered Bank");
         } else {
@@ -307,6 +339,7 @@ public class StraightToBankService {
     }
 
     private HttpHeaders createSCBRequestHeaders(StraightToBankConfigDto config, String messageId, String jwtToken) {
+
         HttpHeaders headers = new HttpHeaders();
 
         // Required headers based on SCB API documentation
@@ -315,11 +348,19 @@ public class StraightToBankService {
 
         // SCB specific headers
         headers.set("Routing-Identifier", "ZZ");
-
         headers.set("X-Request-ID", messageId);
 
         // Correlation ID for tracking
-        headers.set("X-Correlation-ID", UUID.randomUUID().toString());
+        String correlationId = UUID.randomUUID().toString();
+        headers.set("X-Correlation-ID", correlationId);
+
+        // SECURITY HEADER - JWT TOKEN (CRITICAL FIX: Remove duplicate "Bearer")
+        if (jwtToken == null || jwtToken.trim().isEmpty()) {
+            throw new CustomException("JWT token is null or empty - cannot authenticate with SCB");
+        }
+
+        // FIXED: Remove duplicate "Bearer" - use only one
+        headers.set("Authorization", "Bearer " + jwtToken);
 
         // Security headers
         headers.set("Cache-Control", "no-cache");
@@ -328,7 +369,16 @@ public class StraightToBankService {
         // Timestamp
         headers.set("X-Timestamp", new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'").format(new Date()));
 
-        log.debug("Created SCB request headers for message: {}", messageId);
+        log.info("=== FINAL REQUEST HEADERS ===");
+        headers.forEach((key, value) -> {
+            if ("Authorization".equals(key)) {
+                String tokenPreview = value.get(0).length() > 50 ?
+                        value.get(0).substring(0, 50) + "..." : value.get(0);
+                log.info(tokenPreview);
+            } else {
+                log.info("{}: {}", key, value);
+            }
+        });
 
         return headers;
     }
@@ -386,7 +436,7 @@ public class StraightToBankService {
         }
     }
 
-    public ObjectNode generateJsonFile(StraightToBankBatch batch, StraightToBankConfigDto config) throws Exception {
+    public ObjectNode generateJsonFile(StraightToBankBatch batch) throws Exception {
 
         List<StraightToBankBatchLine> lines = batch.getLines();
 
@@ -395,7 +445,6 @@ public class StraightToBankService {
         }
 
         // For now, we'll use the first line to generate the JSON payload
-        // In a real scenario, you might want to handle multiple lines differently
         StraightToBankBatchLine fl = lines.getFirst();
 
         // Create the main JSON object
@@ -403,7 +452,7 @@ public class StraightToBankService {
 
         // Create header object
         ObjectNode headerNode = objectMapper.createObjectNode();
-        headerNode.put("messageId", batch.getMessageId() != null ? batch.getMessageId() : "UGPAYMWPeyRxMOnb");
+        headerNode.put("messageId", batch.getMessageId() != null ? batch.getMessageId() : "XXXXXXXXXX");
         headerNode.put("timestamp", new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'").format(new Date()));
         headerNode.put("countryCode", batch.getCountryCode() != null ? batch.getCountryCode() : "KE");
 
@@ -414,27 +463,27 @@ public class StraightToBankService {
 
         // Amount object (required)
         ObjectNode amountNode = objectMapper.createObjectNode();
-        amountNode.put("amount", fl.getAmountBc() != null ? fl.getAmountBc().doubleValue() : 500.0);
-        amountNode.put("currencyCode", fl.getTransactionCurrency() != null ? fl.getTransactionCurrency() : "KES");
+        amountNode.put("amount", fl.getAmountSc() != null ? fl.getAmountSc() : BigDecimal.ZERO);
+        amountNode.put("currencyCode", fl.getTransactionCurrency() != null ? fl.getTransactionCurrency() : "UGX");
 
         instructionNode.set("amount", amountNode);
 
         // Debtor object (required)
         ObjectNode debtorNode = objectMapper.createObjectNode();
-        debtorNode.put("name", batch.getSchemeName() != null ? batch.getSchemeName() : "SCB");
+        debtorNode.put("name", batch.getDebitAccountName() != null ? batch.getDebitAccountName() : "");
 
         instructionNode.set("debtor", debtorNode);
 
         // Purpose (required)
-        instructionNode.put("purpose", "CASH");
+        instructionNode.put("purpose", extractPurpose(fl.getPurposeOfPayment()));
 
         // Creditor object (required)
         ObjectNode creditorNode = objectMapper.createObjectNode();
-        creditorNode.put("name", fl.getBeneficiaryName() != null ? fl.getBeneficiaryName() : "Beneficiary");
+        creditorNode.put("name", StringUtil.replaceSpecialCharactersLeave(fl.getBeneficiaryName()));
 
         ObjectNode creditorAddressNode = objectMapper.createObjectNode();
         creditorAddressNode.put("country", fl.getBeneficiaryCountryCode() != null ? fl.getBeneficiaryCountryCode() : "KE");
-        creditorAddressNode.put("city", extractCityFromAddress(fl.getBeneficiaryAddress())); // Extract from address
+        creditorAddressNode.put("city", extractCity(fl.getBeneficiaryTown()));
 
         creditorNode.set("postalAddress", creditorAddressNode);
         instructionNode.set("creditor", creditorNode);
@@ -443,38 +492,32 @@ public class StraightToBankService {
         ObjectNode debtorAgentNode = objectMapper.createObjectNode();
         ObjectNode debtorFinancialInstitutionNode = objectMapper.createObjectNode();
         debtorFinancialInstitutionNode.put("BIC", batch.getCashbookSwiftCode() != null ? batch.getCashbookSwiftCode() : "SCBLKENXXXX");
-        debtorFinancialInstitutionNode.put("name", batch.getCashbookName() != null ? batch.getCashbookName() : "Standard Chartered Bank");
+        debtorFinancialInstitutionNode.put("name", getDebtorInstitutionName(batch.getDebitBankName()));
 
         ObjectNode debtorAddressNode = objectMapper.createObjectNode();
-        debtorAddressNode.put("country", batch.getCountryCode() != null ? batch.getCountryCode() : "KE");
-        // City in debtorAgent is optional - include only if available
-        String debtorCity = extractDebtorAgentCity(batch);
-        if (!debtorCity.isEmpty()) {
-            debtorAddressNode.put("city", debtorCity);
-        }
+        debtorAddressNode.put("country", batch.getCountryCode() != null ? batch.getCountryCode() : "UG");
+
+        String debtorCity = extractCity(batch.getDebitAccountTown());
 
         debtorFinancialInstitutionNode.set("postalAddress", debtorAddressNode);
         debtorAgentNode.set("financialInstitution", debtorFinancialInstitutionNode);
         instructionNode.set("debtorAgent", debtorAgentNode);
 
-        // Payment Type (required)
         instructionNode.put("paymentType", determinePaymentType(fl));
 
-        // Reference ID (required)
-        instructionNode.put("referenceId", fl.getRefCode() != null ? fl.getRefCode() : generateReferenceId(batch));
+        instructionNode.put("referenceId", fl.getCustomerRef() != null ? fl.getCustomerRef() : generateReferenceId(batch));
 
-        // Charge Bearer (required) - correct spelling
-        instructionNode.put("chargeBearer", determineChargeBearer(batch));
+        instructionNode.put("chargerBearer", determineChargeBearer(batch));
 
-        // Creditor Agent (required)
         ObjectNode creditorAgentNode = objectMapper.createObjectNode();
         ObjectNode creditorFinancialInstitutionNode = objectMapper.createObjectNode();
-        creditorFinancialInstitutionNode.put("BIC", determineCreditorBic(fl));
-        creditorFinancialInstitutionNode.put("name", fl.getBankName() != null ? fl.getBankName() : "Bank");
+
+        creditorFinancialInstitutionNode.put("BIC", StringUtil.replaceSpecialCharactersLeave(fl.getSwiftCode()));
+        creditorFinancialInstitutionNode.put("name", StringUtil.replaceSpecialCharactersLeave(fl.getBankName()));
 
         ObjectNode creditorAgentAddressNode = objectMapper.createObjectNode();
-        creditorAgentAddressNode.put("country", fl.getBankCountryCode() != null ? fl.getBankCountryCode() : "KE");
-        creditorAgentAddressNode.put("city", determineCreditorAgentCity(fl));
+        creditorAgentAddressNode.put("country", StringUtil.replaceSpecialCharactersLeave(fl.getBankCountryCode()));
+        creditorAgentAddressNode.put("city", extractCity(fl.getBeneficiaryTown()));
 
         creditorFinancialInstitutionNode.set("postalAddress", creditorAgentAddressNode);
         creditorAgentNode.set("financialInstitution", creditorFinancialInstitutionNode);
@@ -482,22 +525,16 @@ public class StraightToBankService {
 
         // Debtor Account (required)
         ObjectNode debtorAccountNode = objectMapper.createObjectNode();
-        debtorAccountNode.put("id", batch.getDebitAccountNo() != null ? batch.getDebitAccountNo() : "2345678904");
+        debtorAccountNode.put("id", StringUtil.replaceSpecialCharactersLeave(batch.getDebitAccountNo()));
         debtorAccountNode.put("identifierType", "BBAN");
-        // Add currency only for foreign currency payments
-        if (isForeignCurrencyPayment(fl)) {
-            debtorAccountNode.put("currency", fl.getTransactionCurrency());
-        }
         instructionNode.set("debtorAccount", debtorAccountNode);
 
         // Creditor Account (required)
         ObjectNode creditorAccountNode = objectMapper.createObjectNode();
-        creditorAccountNode.put("id", fl.getAccountNo() != null ? fl.getAccountNo() : "256777254583");
+        creditorAccountNode.put("id", StringUtil.replaceSpecialCharactersLeave(fl.getAccountNo()));
         creditorAccountNode.put("identifierType", "Other");
-        // Add currency only for foreign currency payments
-        if (isForeignCurrencyPayment(fl)) {
-            creditorAccountNode.put("currency", fl.getTransactionCurrency());
-        }
+
+        creditorAccountNode.put("currency", StringUtil.replaceSpecialCharactersLeave(fl.getTransactionCurrency()));
         instructionNode.set("creditorAccount", creditorAccountNode);
 
         // Remittance Info (optional)
@@ -505,7 +542,7 @@ public class StraightToBankService {
             ObjectNode remittanceInfoNode = objectMapper.createObjectNode();
             ArrayNode multiUnstructuredNode = objectMapper.createArrayNode();
             // Add remittance details from line particulars
-            String[] remittanceLines = extractRemittanceInfo(fl.getParticulars());
+            String[] remittanceLines = extractRemittanceInfo(StringUtil.replaceSpecialCharactersLeave(fl.getParticulars()));
             for (String remittance : remittanceLines) {
                 if (remittance != null && !remittance.trim().isEmpty()) {
                     multiUnstructuredNode.add(remittance.trim());
@@ -517,7 +554,7 @@ public class StraightToBankService {
             }
         }
 
-        // Timestamp and dates (required)
+        // Timestamp and dates
         instructionNode.put("paymentTimestamp", new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'").format(new Date()));
         instructionNode.put("paymentTypePreference", "Explicit");
         instructionNode.put("requiredExecutionDate", new SimpleDateFormat("yyyy-MM-dd").format(batch.getValueDate() != null ? batch.getValueDate() : new Date()));
@@ -525,66 +562,73 @@ public class StraightToBankService {
         rootNode.set("instruction", instructionNode);
 
         log.info("Generated standardized SCB JSON payload for payment: {}", fl.getRefCode());
+
         return rootNode;
+
     }
 
-    // Helper methods for the standardized structure
-    private String extractCityFromAddress(String beneficiaryAddress) {
-        if (beneficiaryAddress == null || beneficiaryAddress.isEmpty()) {
-            return "Nairobi"; // Default fallback
+    private String getDebtorInstitutionName(String debtorInstitutionName){
+
+        if(debtorInstitutionName==null || debtorInstitutionName.isEmpty()){
+            return "Standard Chartered Bank";
         }
-        // Simple extraction - you might want to implement more sophisticated logic
-        String[] addressParts = beneficiaryAddress.split(",");
-        if (addressParts.length > 0) {
-            return addressParts[addressParts.length - 1].trim(); // Assume city is last part
-        }
-        return "Nairobi";
+
+        return StringUtil.replaceSpecialCharactersLeave(debtorInstitutionName);
+
     }
 
-    private String extractDebtorAgentCity(StraightToBankBatch batch) {
-        // Extract city from debtor agent information
-        // This could come from batch.getCashbookBranchCode() or other fields
-        return "NBO"; // Default for now
+    private String extractCity(String beneficiaryTown) {
+
+        if (beneficiaryTown == null || beneficiaryTown.isEmpty()) {
+            return "Kampala";
+        }
+
+        return StringUtil.replaceSpecialCharactersLeave(beneficiaryTown);
+
     }
 
     private String determinePaymentType(StraightToBankBatchLine line) {
-        // Determine payment type based on transaction details
+
         if (line.getPaymentType() != null) {
             return line.getPaymentType();
         }
-        // Default based on currency/country
+
         if (isForeignCurrencyPayment(line)) {
             return "TT"; // Telegraphic Transfer for foreign currency
         }
-        return "PAY"; // Domestic payment
+
+        return "PAY";
+
     }
 
     private String determineChargeBearer(StraightToBankBatch batch) {
-        // Determine charge bearer based on batch configuration
+
         if (batch.getChargeBearer() != null) {
             return batch.getChargeBearer().name(); // Assuming enum
         }
-        return "DEBT"; // Default: debtor bears charges
+
+        return "DEBT";
+
     }
 
     private String determineCreditorBic(StraightToBankBatchLine line) {
-        // Determine creditor BIC based on bank details
+
         if (line.getSwiftCode() != null && !line.getSwiftCode().equals("-")) {
             return line.getSwiftCode();
         }
-        // Fallback logic based on bank name/country
-        if (line.getBankName() != null && line.getBankName().toLowerCase().contains("standard chartered")) {
-            return "SCBLKENXXXX";
-        }
-        return "MPESA"; // Default fallback
+
+        return "XXXXXXXXXX";
+
     }
 
-    private String determineCreditorAgentCity(StraightToBankBatchLine line) {
-        // Extract city from bank details or beneficiary address
-        if (line.getBeneficiaryAddress() != null) {
-            return extractCityFromAddress(line.getBeneficiaryAddress());
+    private String extractPurpose(String purpose){
+
+        if(purpose==null || purpose.isEmpty()){
+            return "CASH";
         }
-        return "Nairobi"; // Default
+
+        return StringUtil.replaceSpecialCharactersLeave(purpose);
+
     }
 
     private boolean isForeignCurrencyPayment(StraightToBankBatchLine line) {
@@ -608,9 +652,7 @@ public class StraightToBankService {
         if (particulars == null || particulars.isEmpty()) {
             return new String[0];
         }
-        // Split particulars into multiple lines for remittance info
-        // You might want to implement more sophisticated parsing
-        return particulars.split("\\|"); // Assuming | is delimiter, adjust as needed
+        return particulars.split("\\|");
     }
 
     private String generateReferenceId(StraightToBankBatch batch) {
@@ -634,6 +676,8 @@ public class StraightToBankService {
                 .cashbookName(batch.getCashbookName())
                 .cashbookAccountName(batch.getDebitAccountName())
                 .cashbookAccountNo(batch.getDebitAccountNo())
+                .debitAccountTown(batch.getDebitAccountTown())
+                .debitBankName(batch.getDebitBankName())
                 .cashbookSwiftCode(batch.getCashbookSwiftCode())
                 .countLines(batch.getCountTransactions())
                 .totalSourceCurrency(batch.getTotal())
@@ -687,6 +731,7 @@ public class StraightToBankService {
                 .refCode(line.getRefCode())
                 .transactionCurrency(line.getTransactionCurrency())
                 .beneficiaryAddress(line.getBeneficiaryAddress())
+                .beneficiaryTown(line.getBeneficiaryTown())
                 .beneficiaryCountryCode(line.getBeneficiaryCountryCode())
                 .beneficiaryCountryName(line.getBeneficiaryCountryName())
                 .jsonRequest(line.getJsonRequest())
@@ -727,6 +772,8 @@ public class StraightToBankService {
                 .cashbookName(batch.getCashbookName())
                 .debitAccountName(batch.getCashbookAccountName())
                 .debitAccountNo(batch.getCashbookAccountNo())
+                .debitAccountTown(batch.getDebitAccountTown())
+                .debitBankName(batch.getCashbookBankName())
                 .cashbookSwiftCode(batch.getCashbookSwiftCode())
                 .countTransactions(batch.getCountLines())
                 .total(batch.getTotalSourceCurrency())
@@ -774,6 +821,7 @@ public class StraightToBankService {
                 .refCode(line.getRefCode())
                 .transactionCurrency(line.getTransactionCurrency())
                 .beneficiaryAddress(line.getBeneficiaryAddress())
+                .beneficiaryTown(line.getBeneficiaryTown())
                 .beneficiaryCountryCode(line.getBeneficiaryCountryCode())
                 .beneficiaryCountryName(line.getBeneficiaryCountryName())
                 .instructionGroup(line.getInstructionGroup())

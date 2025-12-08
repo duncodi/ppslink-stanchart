@@ -43,11 +43,15 @@ public class StraightToBankPayloadDto {
 
     private String cashbookAccountNo;
 
+    private String debitAccountTown;
+
     private String cashbookAccountName;
 
     private String cashbookBranchCode;
 
     private String cashbookBankCode;
+
+    private String cashbookBankName;
 
     private String cashbookSwiftCode;
 
